@@ -1,8 +1,21 @@
-import { readFileSync } from "fs";
-import { dirname, join } from "path";
+import {
+  existsSync,
+  mkdirSync,
+  promises,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "fs";
+import { dirname, join, relative } from "path";
 import { fileURLToPath } from "url";
 import { SourceMapPayload } from "module";
-import { Output, ParserConfig, transform } from "@swc/core";
+import {
+  Output,
+  ParserConfig,
+  transform,
+  version as swcVersion,
+} from "@swc/core";
 import { PluginOption } from "vite";
 
 const runtimePublicPath = "/@react-refresh";
@@ -16,6 +29,17 @@ const _dirname =
   typeof __dirname !== "undefined"
     ? __dirname
     : dirname(fileURLToPath(import.meta.url));
+
+let root: string;
+let cachePath: string;
+const PLUGIN_CACHE_VERSION = 1;
+type CacheEntry = {
+  input: string;
+  code: string;
+  map: SourceMapPayload;
+};
+type MetadataCache = { version: string };
+const cache = new Map<string, CacheEntry>();
 
 const react = (): PluginOption[] => [
   {
@@ -33,6 +57,41 @@ const react = (): PluginOption[] => [
     transformIndexHtml: () => [
       { tag: "script", attrs: { type: "module" }, children: preambleCode },
     ],
+    configResolved: async (config) => {
+      if (cache.size > 0) return;
+      root = config.root;
+      cachePath = join(config.cacheDir, "swc-cache");
+      const metadataPath = join(cachePath, "_metadata.json");
+      const version = `${PLUGIN_CACHE_VERSION}-${swcVersion}`;
+      if (existsSync(metadataPath)) {
+        const content = readFileSync(metadataPath, "utf-8");
+        const previousCache = JSON.parse(content) as MetadataCache;
+        if (previousCache.version === version) {
+          const start = performance.now();
+          await Promise.all(
+            readdirSync(cachePath)
+              .filter((f) => f.endsWith(".json") && f !== "_metadata.json")
+              .map(async (f) => {
+                const json = await promises.readFile(
+                  `${cachePath}/${f}`,
+                  "utf-8",
+                );
+                cache.set(f, JSON.parse(json));
+              }),
+          );
+          console.log(
+            `cache restored: ${(performance.now() - start).toFixed(2)}ms`,
+          );
+        } else {
+          rmSync(cachePath, { recursive: true, force: true });
+          mkdirSync(cachePath);
+        }
+      } else {
+        mkdirSync(cachePath, { recursive: true });
+      }
+      const metadataCache: MetadataCache = { version };
+      writeFileSync(metadataPath, JSON.stringify(metadataCache));
+    },
     async transform(code, id, transformOptions) {
       if (id.includes("node_modules")) return;
 
@@ -44,6 +103,15 @@ const react = (): PluginOption[] => [
         ? { syntax: "ecmascript", jsx: true }
         : undefined;
       if (!parser) return;
+
+      const ssr = transformOptions?.ssr;
+      const fileCachePath = `${relative(root, id).replace(/\//g, "|")}${
+        ssr ? "-srr" : ""
+      }.json`;
+      const cachedEntry = cache.get(fileCachePath);
+      if (cachedEntry?.input === code) {
+        return { code: cachedEntry.code, map: cachedEntry.map };
+      }
 
       let result: Output;
       try {
@@ -58,7 +126,7 @@ const react = (): PluginOption[] => [
             transform: {
               useDefineForClassFields: true,
               react: {
-                refresh: !transformOptions?.ssr,
+                refresh: !ssr,
                 development: true,
                 useBuiltins: true,
                 runtime: "automatic",
@@ -79,9 +147,11 @@ const react = (): PluginOption[] => [
         throw e;
       }
 
-      if (!result.code.includes("$RefreshReg$")) return result;
+      const sourceMap: SourceMapPayload = JSON.parse(result.map!);
 
-      result.code = `import * as RefreshRuntime from "${runtimePublicPath}";
+      if (result.code.includes("$RefreshReg$")) {
+        sourceMap.mappings = ";;;;;;;;" + sourceMap.mappings;
+        result.code = `import * as RefreshRuntime from "${runtimePublicPath}";
   
   if (!window.$RefreshReg$) throw new Error("React refresh preamble was not loaded. Something is wrong.");
   const prevRefreshReg = window.$RefreshReg$;
@@ -101,9 +171,18 @@ const react = (): PluginOption[] => [
   });
 });
   `;
+      }
 
-      const sourceMap: SourceMapPayload = JSON.parse(result.map!);
-      sourceMap.mappings = ";;;;;;;;" + sourceMap.mappings;
+      const entry: CacheEntry = {
+        input: code,
+        code: result.code,
+        map: sourceMap,
+      };
+      promises.writeFile(
+        `${cachePath}/${fileCachePath}`,
+        JSON.stringify(entry),
+      );
+
       return { code: result.code, map: sourceMap };
     },
   },
