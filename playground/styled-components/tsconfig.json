@@ -5,7 +5,7 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "types": ["vite/client", "styled-components/cssprop"],
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
