@@ -1,6 +1,6 @@
 {
-  "name": "@vitejs/plugin-react-swc-monorepo",
-  "version": "3.2.0",
+  "name": "@miksu/plugin-react-swc-monorepo",
+  "version": "0.1.0",
   "type": "module",
   "private": true,
   "scripts": {
